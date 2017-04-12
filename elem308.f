@@ -1,5 +1,5 @@
 c**********************************************************
-      subroutine elem305 (ielem,itask,pelem,nnode,estif,eforc,elnods,
+      subroutine elem308 (ielem,itask,pelem,nnode,estif,eforc,elnods,
      $     xelem,elemdata_nodal,uelem,uelem_meas)
 c     Material model by Sevan Goenezen, written by Sevan Goenezen and optimized 
 c     by Jean-Francois.           
@@ -20,6 +20,7 @@ c**********************************************************
       integer ielem, itask,k,ireg,iset
       integer l, ninte, iinte, inode, jnode,knode
       integer ievab, jevab, jdofn, idofn, i, j, q, r, t
+      integer kk, tt
       integer tmp6, tmp7
       double precision xjaco, wtjac, temp, temp_der
       double precision deno, powe, alpha(2), beta(2), Treg(2)! variables for the regularization
@@ -27,6 +28,7 @@ c**********************************************************
       double precision gamm, mu, Cdet, Inv1, Inv2, K1, K2(3,3), Fdet
       double precision shap(4,mnode_elem), pres(4)
       double precision sg(mquad_elem),tg(mquad_elem),zg(mquad_elem)
+      double precision Ftmp(3,3), Ftmp_det, Sigma(3,3)
       double precision SecPK_grad(3,3), wg(mquad_elem)
       double precision Fdef(3,3), Ctens(3,3), dWdC(3,3), dJdC(3,3)
       double precision Cinv(3,3), SecPK(3,3), ident(3,3), Finv(3,3)
@@ -213,15 +215,33 @@ c!$acc region
         endif
 
 c       compute the deformation gradient at Gauss Point
-        Fdef(:,:) = ident(:,:)
+        Ftmp(:,:) = ident(:,:)
         do inode = 1,nnode
           do j = 1,ndim
             do i = 1,ndim
-              Fdef(i,j)=Fdef(i,j)+uelem(i,inode)*shap(j,inode)
+              Ftmp(i,j)=Ftmp(i,j)-uelem(i,inode)*shap(j,inode)
             end do
           end do
         end do
  
+        Ftmp_det = Ftmp(1,1)*Ftmp(2,2)*Ftmp(3,3) +
+     $             Ftmp(1,2)*Ftmp(2,3)*Ftmp(3,1) +
+     $             Ftmp(1,3)*Ftmp(2,1)*Ftmp(3,2) -
+     $             Ftmp(1,3)*Ftmp(2,2)*Ftmp(3,1) -
+     $             Ftmp(1,2)*Ftmp(2,1)*Ftmp(3,3) -
+     $             Ftmp(1,1)*Ftmp(2,3)*Ftmp(3,2)
+
+        Fdef(1,1) = Ftmp(2,2)*Ftmp(3,3)-Ftmp(2,3)*Ftmp(3,2)
+        Fdef(1,2) = Ftmp(1,3)*Ftmp(3,2)-Ftmp(1,2)*Ftmp(3,3)
+        Fdef(1,3) = Ftmp(1,2)*Ftmp(2,3)-Ftmp(1,3)*Ftmp(2,2)
+        Fdef(2,1) = Ftmp(2,3)*Ftmp(3,1)-Ftmp(2,1)*Ftmp(3,3)
+        Fdef(2,2) = Ftmp(1,1)*Ftmp(3,3)-Ftmp(1,3)*Ftmp(3,1)
+        Fdef(2,3) = Ftmp(1,3)*Ftmp(2,1)-Ftmp(1,1)*Ftmp(2,3)
+        Fdef(3,1) = Ftmp(2,1)*Ftmp(3,2)-Ftmp(2,2)*Ftmp(3,1)
+        Fdef(3,2) = Ftmp(1,2)*Ftmp(3,1)-Ftmp(1,1)*Ftmp(3,2)
+        Fdef(3,3) = Ftmp(1,1)*Ftmp(2,2)-Ftmp(1,2)*Ftmp(2,1)
+        Fdef(:,:) = (1.0d0/Ftmp_det)*Fdef(:,:)
+
 c       Fdet is the Jacobian, determinant of the deformation gradient
         Fdet = Fdef(1,1)*Fdef(2,2)*Fdef(3,3) +
      $         Fdef(1,2)*Fdef(2,3)*Fdef(3,1) +
@@ -312,6 +332,19 @@ c       and the material tangent Ctang
         dWdC(1:3,1:3) = tmp4*K2(1:3,1:3)
 
         SecPK(1:3,1:3) = 2.0d0*(dWdC(1:3,1:3)-pres(4)*dJdC(1:3,1:3))
+
+c       compute Cauchy stress tensor
+        Sigma(1:3,1:3) = 0.0d0
+        do i = 1, ndim
+         do r = 1, ndim
+          do q = 1, ndim
+           do j = 1, ndim
+            Sigma(i,r) = Sigma(i,r) +
+     $                   Fdef(i,j)*SecPK(j,q)*Fdef(r,q)/Fdet
+           end do
+          end do
+         end do
+        end do
 
 c        if (ielem==90.AND.iinte==1) then
 c          Print*,Fdef(1,:)
@@ -574,51 +607,51 @@ c        endif
 c        endif
 
 c       construct the element stiffness matrix 
-        Igeo(1,1) = SecPK(1,1)
+        Igeo(1,1) = Sigma(1,1)
         Igeo(1,2) = 0.0d0
-        Igeo(2,2) = SecPK(2,2)
+        Igeo(2,2) = Sigma(2,2)
         Igeo(1,3) = 0.0d0
         Igeo(2,3) = 0.0d0
-        Igeo(3,3) = SecPK(3,3)
-        Igeo(1,4) = 0.5d0*SecPK(1,2)
-        Igeo(2,4) = Igeo(1,4)! = 0.5d0*SecPK(2,1)
+        Igeo(3,3) = Sigma(3,3)
+        Igeo(1,4) = 0.5d0*Sigma(1,2)
+        Igeo(2,4) = Igeo(1,4)! = 0.5d0*Sigma(2,1)
         Igeo(3,4) = 0.0d0
-        Igeo(4,4) = 0.25d0*(SecPK(2,2)+SecPK(1,1))
-        Igeo(1,5) = 0.5d0*SecPK(1,3)
+        Igeo(4,4) = 0.25d0*(Sigma(2,2)+Sigma(1,1))
+        Igeo(1,5) = 0.5d0*Sigma(1,3)
         Igeo(2,5) = 0.0d0
-        Igeo(3,5) = Igeo(1,5)! = 0.5d0*SecPK(3,1)
-        Igeo(4,5) = 0.25d0*SecPK(2,3)
-        Igeo(5,5) = 0.25d0*(SecPK(3,3)+SecPK(1,1))
+        Igeo(3,5) = Igeo(1,5)! = 0.5d0*Sigma(3,1)
+        Igeo(4,5) = 0.25d0*Sigma(2,3)
+        Igeo(5,5) = 0.25d0*(Sigma(3,3)+Sigma(1,1))
         Igeo(1,6) = 0.0d0
-        Igeo(2,6) = 0.5d0*SecPK(2,3)
-        Igeo(3,6) = Igeo(2,6)! = 0.5d0*SecPK(3,2)
-        Igeo(4,6) = 0.25d0*SecPK(1,3)
-        Igeo(5,6) = 0.25d0*SecPK(1,2)
-        Igeo(6,6) = 0.25d0*(SecPK(3,3)+SecPK(2,2))
-        Igeo(1,7) = 0.5d0*SecPK(1,2)
-        Igeo(2,7) = -0.5d0*SecPK(2,1)
+        Igeo(2,6) = 0.5d0*Sigma(2,3)
+        Igeo(3,6) = Igeo(2,6)! = 0.5d0*Sigma(3,2)
+        Igeo(4,6) = 0.25d0*Sigma(1,3)
+        Igeo(5,6) = 0.25d0*Sigma(1,2)
+        Igeo(6,6) = 0.25d0*(Sigma(3,3)+Sigma(2,2))
+        Igeo(1,7) = 0.5d0*Sigma(1,2)
+        Igeo(2,7) = -0.5d0*Sigma(2,1)
         Igeo(3,7) = 0.0d0
-        Igeo(4,7) = 0.25d0*(SecPK(2,2)-SecPK(1,1))
-        Igeo(5,7) = 0.25d0*SecPK(3,2)
-        Igeo(6,7) = -0.25d0*SecPK(3,1)
-        Igeo(7,7) = 0.25d0*(SecPK(2,2)+SecPK(1,1))
-        Igeo(1,8) = Igeo(1,5)! = 0.5d0*SecPK(1,3)
+        Igeo(4,7) = 0.25d0*(Sigma(2,2)-Sigma(1,1))
+        Igeo(5,7) = 0.25d0*Sigma(3,2)
+        Igeo(6,7) = -0.25d0*Sigma(3,1)
+        Igeo(7,7) = 0.25d0*(Sigma(2,2)+Sigma(1,1))
+        Igeo(1,8) = Igeo(1,5)! = 0.5d0*Sigma(1,3)
         Igeo(2,8) = 0.0d0
-        Igeo(3,8) = -0.5d0*SecPK(3,1)
-        Igeo(4,8) = Igeo(5,7)! = 0.25d0*SecPK(2,3)
-        Igeo(5,8) = 0.25d0*(SecPK(3,3)-SecPK(1,1))
-        Igeo(6,8) = -0.25d0*SecPK(2,1)
-        Igeo(7,8) = Igeo(4,8)! = 0.25d0*SecPK(2,3)
-        Igeo(8,8) = 0.25d0*(SecPK(3,3)+SecPK(1,1))
+        Igeo(3,8) = -0.5d0*Sigma(3,1)
+        Igeo(4,8) = Igeo(5,7)! = 0.25d0*Sigma(2,3)
+        Igeo(5,8) = 0.25d0*(Sigma(3,3)-Sigma(1,1))
+        Igeo(6,8) = -0.25d0*Sigma(2,1)
+        Igeo(7,8) = Igeo(4,8)! = 0.25d0*Sigma(2,3)
+        Igeo(8,8) = 0.25d0*(Sigma(3,3)+Sigma(1,1))
         Igeo(1,9) = 0.0d0
-        Igeo(2,9) = Igeo(2,6)! = 0.5d0*SecPK(2,3)
-        Igeo(3,9) = -0.5d0*SecPK(3,2)
-        Igeo(4,9) = 0.25d0*SecPK(1,3)
-        Igeo(5,9) = -0.25d0*SecPK(1,2)
-        Igeo(6,9) = 0.25d0*(SecPK(3,3)-SecPK(2,2))
-        Igeo(7,9) = -0.25d0*SecPK(1,3)
-        Igeo(8,9) = Igeo(5,6)! = 0.25d0*SecPK(1,2)
-        Igeo(9,9) = Igeo(6,6)! = 0.25d0*(SecPK(2,2)+SecPK(3,3))
+        Igeo(2,9) = Igeo(2,6)! = 0.5d0*Sigma(2,3)
+        Igeo(3,9) = -0.5d0*Sigma(3,2)
+        Igeo(4,9) = 0.25d0*Sigma(1,3)
+        Igeo(5,9) = -0.25d0*Sigma(1,2)
+        Igeo(6,9) = 0.25d0*(Sigma(3,3)-Sigma(2,2))
+        Igeo(7,9) = -0.25d0*Sigma(1,3)
+        Igeo(8,9) = Igeo(5,6)! = 0.25d0*Sigma(1,2)
+        Igeo(9,9) = Igeo(6,6)! = 0.25d0*(Sigma(2,2)+Sigma(3,3))
 c       enforce the symmetries
         do i = 1,8
           do j = (i+1),9
@@ -644,8 +677,13 @@ c       Lmat shows major symmetries [(i,j)<->(q,r)] JFD how can this be implemen
                 if (tmp7.le.tmp6) then! use more major symmetries
                   do k = 1, ndim
                     do t = 1, ndim
-                      Lmat(i,j,q,r) = Lmat(i,j,q,r) +
-     $                         4.0d0*Fdef(i,k)*Fdef(q,t)*Ctang(j,k,r,t)
+                     do kk = 1, ndim
+                      do tt = 1, ndim
+                        Lmat(i,j,q,r) = Lmat(i,j,q,r) +
+     $                  4.0d0*Fdef(i,k)*Fdef(q,t)*Fdef(j,kk)*Fdef(r,tt)*
+     $                  Ctang(kk,k,tt,t)/Fdet
+                      end do
+                     end do
                     end do
                   end do
                   Lmat(q,r,i,j)=Lmat(i,j,q,r)! major symmetry
@@ -756,35 +794,19 @@ c       create the b-matrix
               do jdofn = 1,4! 4 = elemvec_ndofn(jnode)
                 jevab = jevab+1
                 if (idofn.le.3  .AND. jdofn.eq.4) then
-                  estif(ievab,jevab)=estif(ievab,jevab)-Fdet*
-     $                (shap(1,inode)*Finv(1,idofn)+
-     $                 shap(2,inode)*Finv(2,idofn)+
-     $                 shap(3,inode)*Finv(3,idofn))
-     $                                         *shap(4,jnode)*wtjac
+                  estif(ievab,jevab)=estif(ievab,jevab)-
+     $                 shap(idofn,inode)*shap(4,jnode)*wtjac
                 elseif (idofn.eq.4 .AND. jdofn.le.3) then
                   estif(ievab,jevab)=estif(ievab,jevab)+Fdet*
      $               (shap(1,jnode)*Finv(1,jdofn)+
      $                shap(2,jnode)*Finv(2,jdofn)+
      $                shap(3,jnode)*Finv(3,jdofn))
      $                                  *shap(4,inode)*wtjac! symmetric part
-                  do j = 1,ndim
-                    do i = 1,ndim
-                      do k = 1,ndim
-                        do l = 1,ndim 
-                          estif(ievab,jevab)=estif(ievab,jevab)+4.0d0*
-     $                       temp *pres(i)*shap(j,inode)*d2JdC(i,j,k,l)
-     $                       *Fdef(jdofn,k)*shap(l,jnode)*wtjac
-                        end do
-                      end do
-                    end do
-                  end do
                 elseif (idofn.eq.4  .AND. jdofn.eq.4) then
                   do i = 1,ndim
-                    do j = 1,ndim
-                      estif(ievab,jevab)=estif(ievab,jevab)+2.0d0*
-     $                   temp*dJdC(i,j)*shap(i,jnode)*shap(j,inode)
-     $                   *wtjac
-                    end do
+                    estif(ievab,jevab)=estif(ievab,jevab)+
+     $                 temp*shap(i,jnode)*shap(i,inode)
+     $                 *wtjac
                   end do
                 else! (idofn.lt.4  .AND. jdofn.lt.4) then
                  if (ievab.le.jevab) then! use symmetries
@@ -805,9 +827,7 @@ c       create the b-matrix
 c       create element residual for right hand side
         Tp(1:4) = 0.0d0
         do i = 1, ndim
-          do j = 1, ndim
-            Tp(i) = Tp(i) + 2.0d0*temp*dJdC(j,i)*pres(j)
-          end do
+          Tp(i) = Tp(i) + temp*pres(i)
         end do
 
         Tp(4) = Fdet-1.0d0 
@@ -833,7 +853,7 @@ c       JFD: extend FS to account for Tp and avoid the if loop below?
             else
               do j = 1, 3
                 eforc(ievab)=eforc(ievab)+
-     $                        shap(j,inode)*FS(i,j)*wtjac
+     $                        shap(j,inode)*Sigma(i,j)*wtjac
               end do
             end if
           end do
