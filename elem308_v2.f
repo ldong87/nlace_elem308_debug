@@ -1,5 +1,5 @@
 c**********************************************************
-      subroutine elem305 (ielem,itask,pelem,nnode,estif,eforc,elnods,
+      subroutine elem308 (ielem,itask,pelem,nnode,estif,eforc,elnods,
      $     xelem,elemdata_nodal,uelem,uelem_meas)
 c     Material model by Sevan Goenezen, written by Sevan Goenezen and optimized 
 c     by Jean-Francois.           
@@ -20,11 +20,13 @@ c**********************************************************
       integer ielem, itask,k,ireg,iset
       integer l, ninte, iinte, inode, jnode,knode
       integer ievab, jevab, jdofn, idofn, i, j, q, r, t
+      integer i_, j_, q_, r_
       integer tmp6, tmp7
       double precision xjaco, wtjac, temp, temp_der
       double precision deno, powe, alpha(2), beta(2), Treg(2)! variables for the regularization
       double precision h, tmp1, tmp2, tmp3, tmp4, tmp5, tauMult! variables for the stabilization
       double precision gamm, mu, Cdet, Inv1, Inv2, K1, K2(3,3), Fdet
+      double precision Ftmp(3,3), Ftmp_det, Sigma(3,3), Lmat_(3,3,3,3)
       double precision shap(4,mnode_elem), pres(4)
       double precision sg(mquad_elem),tg(mquad_elem),zg(mquad_elem)
       double precision SecPK_grad(3,3), wg(mquad_elem)
@@ -183,6 +185,7 @@ c     initialize variables
 
 c!$OMP PARALLEL DO
 c!$OMP& PRIVATE(iinte,shap,xjaco,wtjac,mu,gamm,inode,temp,Fdef,j,
+c!$OMP&  Ftmp,Ftmp_det,Sigma,Lmat_
 c!$OMP&  Fdet,Finv,pres,Ctens,r,Cdet,Cinv,Inv1,dJdC,tmp5,K1,tmp2,K2,tmp4,
 c!$OMP&  tmp3,dWdC,SecPK,dCinvdCt,Ctang,d2JdC,Igeo,Lmat,q,k,t,Dgeomat,
 c!$OMP&  bb,ievab,idofn,jevab,jnode,jdofn,Tp,FS)
@@ -213,15 +216,33 @@ c!$acc region
         endif
 
 c       compute the deformation gradient at Gauss Point
-        Fdef(:,:) = ident(:,:)
+        Ftmp(:,:) = ident(:,:)
         do inode = 1,nnode
           do j = 1,ndim
             do i = 1,ndim
-              Fdef(i,j)=Fdef(i,j)+uelem(i,inode)*shap(j,inode)
+              Ftmp(i,j)=Ftmp(i,j)-uelem(i,inode)*shap(j,inode)
             end do
           end do
         end do
  
+        Ftmp_det = Ftmp(1,1)*Ftmp(2,2)*Ftmp(3,3) +
+     $             Ftmp(1,2)*Ftmp(2,3)*Ftmp(3,1) +
+     $             Ftmp(1,3)*Ftmp(2,1)*Ftmp(3,2) -
+     $             Ftmp(1,3)*Ftmp(2,2)*Ftmp(3,1) -
+     $             Ftmp(1,2)*Ftmp(2,1)*Ftmp(3,3) -
+     $             Ftmp(1,1)*Ftmp(2,3)*Ftmp(3,2)
+
+        Fdef(1,1) = Ftmp(2,2)*Ftmp(3,3)-Ftmp(2,3)*Ftmp(3,2)
+        Fdef(1,2) = Ftmp(1,3)*Ftmp(3,2)-Ftmp(1,2)*Ftmp(3,3)
+        Fdef(1,3) = Ftmp(1,2)*Ftmp(2,3)-Ftmp(1,3)*Ftmp(2,2)
+        Fdef(2,1) = Ftmp(2,3)*Ftmp(3,1)-Ftmp(2,1)*Ftmp(3,3)
+        Fdef(2,2) = Ftmp(1,1)*Ftmp(3,3)-Ftmp(1,3)*Ftmp(3,1)
+        Fdef(2,3) = Ftmp(1,3)*Ftmp(2,1)-Ftmp(1,1)*Ftmp(2,3)
+        Fdef(3,1) = Ftmp(2,1)*Ftmp(3,2)-Ftmp(2,2)*Ftmp(3,1)
+        Fdef(3,2) = Ftmp(1,2)*Ftmp(3,1)-Ftmp(1,1)*Ftmp(3,2)
+        Fdef(3,3) = Ftmp(1,1)*Ftmp(2,2)-Ftmp(1,2)*Ftmp(2,1)
+        Fdef(:,:) = (1.0d0/Ftmp_det)*Fdef(:,:)
+
 c       Fdet is the Jacobian, determinant of the deformation gradient
         Fdet = Fdef(1,1)*Fdef(2,2)*Fdef(3,3) +
      $         Fdef(1,2)*Fdef(2,3)*Fdef(3,1) +
@@ -312,6 +333,19 @@ c       and the material tangent Ctang
         dWdC(1:3,1:3) = tmp4*K2(1:3,1:3)
 
         SecPK(1:3,1:3) = 2.0d0*(dWdC(1:3,1:3)-pres(4)*dJdC(1:3,1:3))
+
+c       compute Cauchy stress tensor
+        Sigma(:,:) = 0.0d0
+        do i = 1, ndim
+         do r = 1, ndim
+          do q = 1, ndim
+           do j = 1, ndim
+            Sigma(i,r) = Sigma(i,r) + 
+     $       Fdef(i,j)*SecPK(j,q)*Fdef(r,q)/Fdet
+            enddo
+           enddo
+          enddo
+         enddo
 
 c        if (.false.) then
 c        do i = 1, ndime
@@ -624,22 +658,41 @@ c        endif
         ! build Ctang=Ctang-pres(4)*d2JdC now (note d2JdC is reused after)
         Ctang(:,:,:,:)=Ctang(:,:,:,:)-pres(4)*d2JdC(:,:,:,:)
 c       Lmat shows major symmetries [(i,j)<->(q,r)] JFD how can this be implemented fast?
+        Lmat_(:,:,:,:) = 0.0d0
+        do r = 1, ndim
+          do q = 1, ndim
+c            tmp6=q+(r-1)*ndim
+            do j = 1, ndim !r! major symmetry
+              do i = 1, ndim
+c                tmp7=i+(j-1)*ndim
+c                if (tmp7.le.tmp6) then! use more major symmetries
+                  do r_ = 1, ndim
+                    do q_ = 1, ndim
+                     do j_ = 1, ndim
+                      do i_ = 1, ndim
+                       Lmat_(i,j,q,r) = Lmat_(i,j,q,r) +
+     $                    Fdef(i,i_)*Fdef(j,j_)*Fdef(q,q_)*Fdef(r,r_)*
+     $                    4.0d0*Ctang(i_,j_,q_,r_)/Fdet
+                      end do
+                     end do
+                    end do
+                  end do
+c                  Lmat(q,r,i,j)=Lmat(i,j,q,r)! major symmetry
+c                endif
+              end do
+            end do
+          end do
+        end do
+
         Lmat(:,:,:,:) = 0.0d0
         do r = 1, ndim
           do q = 1, ndim
-            tmp6=q+(r-1)*ndim
-            do j = 1, r! major symmetry
+            do j = 1, ndim
               do i = 1, ndim
-                tmp7=i+(j-1)*ndim
-                if (tmp7.le.tmp6) then! use more major symmetries
-                  do k = 1, ndim
-                    do t = 1, ndim
-                      Lmat(i,j,q,r) = Lmat(i,j,q,r) +
-     $                         4.0d0*Fdef(i,k)*Fdef(q,t)*Ctang(j,k,r,t)
-                    end do
-                  end do
-                  Lmat(q,r,i,j)=Lmat(i,j,q,r)! major symmetry
-                endif
+                do q_ = 1, ndim
+                   Lmat(i,j,q,r) = Lmat(i,j,q,r) +
+     $                Fdef(q,q_)*Lmat_(i,j,q_,r)
+                end do
               end do
             end do
           end do
@@ -752,45 +805,38 @@ c       create the b-matrix
               do jdofn = 1,4! 4 = elemvec_ndofn(jnode)
                 jevab = jevab+1
                 if (idofn.le.3  .AND. jdofn.eq.4) then
-                  estif(ievab,jevab)=estif(ievab,jevab)-Fdet*
-     $                (shap(1,inode)*Finv(1,idofn)+
-     $                 shap(2,inode)*Finv(2,idofn)+
-     $                 shap(3,inode)*Finv(3,idofn))
-     $                                         *shap(4,jnode)*wtjac
+                  estif(ievab,jevab)=estif(ievab,jevab)-
+     $                 shap(idofn,inode)*shap(4,jnode)*wtjac
                 elseif (idofn.eq.4 .AND. jdofn.le.3) then
                   estif(ievab,jevab)=estif(ievab,jevab)+Fdet*
-     $               (shap(1,jnode)*Finv(1,jdofn)+
-     $                shap(2,jnode)*Finv(2,jdofn)+
-     $                shap(3,jnode)*Finv(3,jdofn))
+     $               (shap(1,jnode)*Fdef(1,jdofn)+
+     $                shap(2,jnode)*Fdef(2,jdofn)+
+     $                shap(3,jnode)*Fdef(3,jdofn))
      $                                  *shap(4,inode)*wtjac! symmetric part
-                  do j = 1,ndim
-                    do i = 1,ndim
-                      do k = 1,ndim
-                        do l = 1,ndim 
-                          estif(ievab,jevab)=estif(ievab,jevab)+4.0d0*
-     $                       temp *pres(i)*shap(j,inode)*d2JdC(i,j,k,l)
-     $                       *Fdef(jdofn,k)*shap(l,jnode)*wtjac
-                        end do
-                      end do
-                    end do
-                  end do
                 elseif (idofn.eq.4  .AND. jdofn.eq.4) then
                   do i = 1,ndim
-                    do j = 1,ndim
-                      estif(ievab,jevab)=estif(ievab,jevab)+2.0d0*
-     $                   temp*dJdC(i,j)*shap(i,jnode)*shap(j,inode)
-     $                   *wtjac
-                    end do
+                    estif(ievab,jevab)=estif(ievab,jevab)+
+     $                 temp*shap(i,jnode)*shap(i,inode)
+     $                 *wtjac
                   end do
                 else! (idofn.lt.4  .AND. jdofn.lt.4) then
                  if (ievab.le.jevab) then! use symmetries
-                  do i = 1, 9
-                    do j = 1, 9
-                      estif(ievab,jevab)=estif(ievab,jevab)+
-     $                         bb(inode,i,idofn)*Dgeomat(i,j)*
-     $                         bb(jnode,j,jdofn)*wtjac
-                    end do
-                  end do
+c                  do i = 1, 9
+c                    do j = 1, 9
+c                      estif(ievab,jevab)=estif(ievab,jevab)+
+c     $                         bb(inode,i,idofn)*Dgeomat(i,j)*
+c     $                         bb(jnode,j,jdofn)*wtjac
+c                    end do
+c                  end do
+                  do j = 1, ndim
+                   do t = 1, ndim
+                    estif(ievab,jevab)=estif(ievab,jevab)+
+     $               shap(j,inode)*
+     $               ( -Fdef(t,jdofn)*Sigma(idofn,j)
+     $                 +Fdef(idofn,jdofn)*Sigma(t,j)
+     $                 +Lmat(idofn,j,jdofn,t)
+     $                 +Fdef(j,jdofn)*Sigma(t,idofn) )
+     $                *shap(t,jnode)*wtjac
                  endif! the symmetric part is filled after the end of the Gauss integration
                 end if
               end do! jdofn
@@ -801,21 +847,11 @@ c       create the b-matrix
 c       create element residual for right hand side
         Tp(1:4) = 0.0d0
         do i = 1, ndim
-          do j = 1, ndim
-            Tp(i) = Tp(i) + 2.0d0*temp*dJdC(j,i)*pres(j)
-          end do
+          Tp(i) = Tp(i) + temp*pres(i)
         end do
 
         Tp(4) = Fdet-1.0d0 
 
-        FS(:,:) = 0.0d0
-        do i = 1, ndim
-          do j = 1, ndim
-            do r = 1, ndim
-               FS(i,j) = FS(i,j)+Fdef(i,r)*SecPK(r,j)
-            end do
-          end do
-        end do
 c       JFD: extend FS to account for Tp and avoid the if loop below?
         ievab = 0
         do inode = 1, nnode
@@ -829,7 +865,7 @@ c       JFD: extend FS to account for Tp and avoid the if loop below?
             else
               do j = 1, 3
                 eforc(ievab)=eforc(ievab)+
-     $                        shap(j,inode)*FS(i,j)*wtjac
+     $                        shap(j,inode)*Sigma(i,j)*wtjac
               end do
             end if
           end do
